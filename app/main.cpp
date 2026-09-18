@@ -226,7 +226,12 @@ static uint8_t g_flags_core1[MAX_QUEUED_TRIS];
 static void core1_raster_loop(void)
 {
 	for (;;) {
+		/* Waiting for a frame is all this core does between frames, and it is
+		 * the only thing picosdl can be told about it - everything outside the
+		 * two brackets is the half-frame this core actually renders. */
+		PSDL_CpuIdle();
 		uint32_t n_tris = multicore_fifo_pop_blocking();
+		PSDL_CpuBusy();
 
 		memset(g_flags_core1, 0, n_tris);
 		g_scene->rasterizeBand(SCREEN_H / 2, SCREEN_H, g_flags_core1);
@@ -270,7 +275,9 @@ static void raster_executor(Scene &scene)
 	memset(g_flags_core0, 0, queued);
 	scene.rasterizeBand(0, SCREEN_H / 2, g_flags_core0);
 
+	PSDL_CpuIdle();
 	(void)multicore_fifo_pop_blocking();      /* core 1's band has landed */
+	PSDL_CpuBusy();
 
 	/* Published before returning, per the executor contract. Neither core wrote
 	 * lastFrameRasterizedTriangles - both were given a flags array - so the

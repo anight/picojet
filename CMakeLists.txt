@@ -142,3 +142,28 @@ target_compile_definitions(picojet PRIVATE PICO_HEAP_SIZE=163840)
 pico_enable_stdio_uart(picojet 1)
 pico_enable_stdio_usb(picojet 1)
 pico_add_extra_outputs(picojet)
+
+# ------------------------------------------------------------- picojet-flight
+#
+# The second demo: one aircraft over a cloud deck, steered with the stick.
+#
+# A separate binary rather than a mode of the first, because the two want the
+# memory arranged differently. The viewer spends it on a heap big enough for
+# whichever model is loaded; this one has a single mesh it never swaps, and
+# spends what that frees on the cloud renderer's noise and colour tables.
+#
+add_executable(picojet-flight app/flight.cpp app/clouds.cpp)
+
+target_link_libraries(picojet-flight PRIVATE Jet picosdl)
+
+set_source_files_properties(app/flight.cpp PROPERTIES COMPILE_OPTIONS "-Wall;-Wextra")
+
+# One mesh, built once at start-up and never replaced, so this is the F22 plus
+# Scene's render queue for 200 triangles and nothing else.
+target_compile_definitions(picojet-flight PRIVATE PICO_HEAP_SIZE=49152)
+target_compile_definitions(picojet-flight PRIVATE
+    PICOJET_SYS_CLOCK_KHZ=${PICOJET_SYS_CLOCK_KHZ})
+
+pico_enable_stdio_uart(picojet-flight 1)
+pico_enable_stdio_usb(picojet-flight 1)
+pico_add_extra_outputs(picojet-flight)
