@@ -412,26 +412,33 @@ static void build_flames(Object &flame, Material *mat, int32_t S)
 /*
  * Make it burn, at time `t`.
  *
- * Two things move and they move at different rates. The texture scrolls fast,
- * several times a second, which is the boil - combustion turbulence has no beat
- * to it and reads as noise. The surge underneath is slower and is what changes
- * the plume's size.
+ * Two things move and they move at different rates. The texture scrolls, which
+ * is the boil - combustion turbulence has no beat to it and reads as noise. The
+ * surge underneath changes the plume's size.
  *
- * Both are offset between the engines. In step it looks like the screen
+ * How fast either may go has a hard ceiling that is nothing to do with taste.
+ * The flame is sampled once a frame, so at the forty-odd frames a second this
+ * runs at, anything above about 20 Hz aliases and reads as random jitter rather
+ * than as fire. The fastest term below is near 12 Hz - four samples a cycle,
+ * about as quick as it can be driven and still look like it is burning.
+ *
+ * Everything is offset between the engines. In step it looks like the screen
  * brightness changing; out of step, one nozzle running long while the other sags
  * is what the eye reads as fire.
  */
+static constexpr float FLAME_BOIL = 11000.0f;   /* texture time-axis units per second */
+
 static void flames_update(Object &flame, float t, int32_t S)
 {
 	for (int side = 0; side < 2; ++side) {
 		const float p    = side ? 2.39f : 0.0f;
-		const float surge = 0.58f * sinf(t * 17.0f + p)
-		                  + 0.30f * sinf(t * 29.3f + p * 1.7f)
-		                  + 0.12f * sinf(t *  7.1f + p * 0.6f);
+		const float surge = 0.58f * sinf(t * 44.0f + p)
+		                  + 0.30f * sinf(t * 73.0f + p * 1.7f)
+		                  + 0.12f * sinf(t * 19.0f + p * 0.6f);
 
-		const int32_t phase = (int32_t)(t * 3600.0f) + (side ? 512 : 0);
+		const int32_t phase = (int32_t)(t * FLAME_BOIL) + (side ? 512 : 0);
 
-		flame_shape(flame, side, 1.0f + 0.30f * surge, phase, S);
+		flame_shape(flame, side, 1.0f + 0.34f * surge, phase, S);
 	}
 
 	flame.calculateBoundingBox();
