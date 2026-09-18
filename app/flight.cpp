@@ -120,20 +120,32 @@ static uint16_t *volatile g_back;
  * more than it separates. Core 0 does its own top half between the two, so the
  * cores meet only at the token.
  */
+/* ---- PROFILE ---- */
+volatile uint32_t pf_c1_wait, pf_c1_clouds, pf_c1_tris;
+volatile uint32_t pf_exec, pf_c0_clouds, pf_c0_tris, pf_join;
+
 static void core1_worker(void)
 {
 	for (;;) {
 		/* Waiting for a frame is all this core does between frames, and it is
 		 * the only thing picosdl can be told about it - everything outside the
 		 * two brackets is the half-frame this core actually renders. */
+		absolute_time_t w0 = get_absolute_time();
 		PSDL_CpuIdle();
 		uint32_t n_tris = multicore_fifo_pop_blocking();
 		PSDL_CpuBusy();
+		absolute_time_t w1 = get_absolute_time();
 
 		clouds_render_band(g_back, SCREEN_W, BAND_SPLIT, SCREEN_H);
+		absolute_time_t w2 = get_absolute_time();
 
 		memset(g_flags_core1, 0, n_tris);
 		g_scene->rasterizeBand(BAND_SPLIT, SCREEN_H, g_flags_core1);
+		absolute_time_t w3 = get_absolute_time();
+
+		pf_c1_wait   += (uint32_t)absolute_time_diff_us(w0, w1);
+		pf_c1_clouds += (uint32_t)absolute_time_diff_us(w1, w2);
+		pf_c1_tris   += (uint32_t)absolute_time_diff_us(w2, w3);
 
 		multicore_fifo_push_blocking(1);
 	}
@@ -162,14 +174,23 @@ static void raster_executor(Scene &scene)
 	 * is complete, and the token carries that ordering. */
 	multicore_fifo_push_blocking((uint32_t)queued);
 
+	absolute_time_t e0 = get_absolute_time();
 	clouds_render_band(g_back, SCREEN_W, 0, BAND_SPLIT);
+	absolute_time_t e1 = get_absolute_time();
 
 	memset(g_flags_core0, 0, queued);
 	scene.rasterizeBand(0, BAND_SPLIT, g_flags_core0);
+	absolute_time_t e2 = get_absolute_time();
 
 	PSDL_CpuIdle();
 	(void)multicore_fifo_pop_blocking();      /* core 1 has finished its half */
 	PSDL_CpuBusy();
+	absolute_time_t e3 = get_absolute_time();
+
+	pf_c0_clouds += (uint32_t)absolute_time_diff_us(e0, e1);
+	pf_c0_tris   += (uint32_t)absolute_time_diff_us(e1, e2);
+	pf_join      += (uint32_t)absolute_time_diff_us(e2, e3);
+	pf_exec      += (uint32_t)absolute_time_diff_us(e0, e3);
 
 	int rasterized = 0;
 	for (int i = 0; i < queued; ++i)
@@ -560,7 +581,10 @@ int main(void)
 	int    frames      = 0;
 	Uint32 fps_mark_ms = last_ms;
 
+	uint32_t pf_input=0, pf_bufwait=0, pf_cb=0, pf_render=0, pf_present=0;
+	absolute_time_t pf_mark = get_absolute_time();
 	for (bool running = true; running; ) {
+		absolute_time_t p0 = get_absolute_time();
 		SDL_Event ev;
 		while (SDL_PollEvent(&ev)) {
 			if (ev.type == SDL_QUIT)
@@ -651,22 +675,33 @@ int main(void)
 
 		/* ----------------------------------------------------- the frame */
 
+		absolute_time_t p1 = get_absolute_time();
 		uint16_t *back = g_framebuffer[back_index];
 		while (PSDL_BufferBusy(back)) { }
+		absolute_time_t p2 = get_absolute_time();
 
 		g_back = back;
 		scene.setFramebuffer(back);
 
 		clouds_begin_frame(yaw, dt);
+		absolute_time_t p3 = get_absolute_time();
 
 		/* render() runs prepareFrame(), then the executor above - which lays the
 		 * sky down on both cores before either draws a triangle over it - then
 		 * the post-process and sprite passes. */
 		scene.render(raster_executor);
+		absolute_time_t p4 = get_absolute_time();
 
 		PSDL_PresentBuffer(back, SCREEN_W, SCREEN_H,
 		                   SCREEN_W * (int)sizeof(uint16_t));
 		back_index ^= 1;
+		absolute_time_t p5 = get_absolute_time();
+
+		pf_input   += (uint32_t)absolute_time_diff_us(p0, p1);
+		pf_bufwait += (uint32_t)absolute_time_diff_us(p1, p2);
+		pf_cb      += (uint32_t)absolute_time_diff_us(p2, p3);
+		pf_render  += (uint32_t)absolute_time_diff_us(p3, p4);
+		pf_present += (uint32_t)absolute_time_diff_us(p4, p5);
 
 		++frames;
 		if (now_ms - fps_mark_ms >= 1000) {
@@ -674,6 +709,25 @@ int main(void)
 			       (unsigned)(frames * 1000 / (now_ms - fps_mark_ms)),
 			       ((int)(yaw * 57.2958f) % 360 + 360) % 360,
 			       (int)bank, scene.lastFrameDrawnTriangles);
+			uint32_t wall = (uint32_t)absolute_time_diff_us(pf_mark, get_absolute_time());
+			pf_mark = get_absolute_time();
+			uint32_t f = frames ? frames : 1;
+			uint32_t prep = pf_render - pf_exec;
+			uint32_t c0busy = pf_input + pf_cb + prep + pf_c0_clouds + pf_c0_tris + pf_present;
+			uint32_t c1busy = pf_c1_clouds + pf_c1_tris;
+			printf("  CORE0 %2u%%: input %4u cloudsbegin %3u prepare %4u clouds %5u tris %4u present %3u | IDLE bufwait %3u join %5u\n",
+			       (unsigned)(100u * c0busy / wall), (unsigned)(pf_input / f),
+			       (unsigned)(pf_cb / f), (unsigned)(prep / f),
+			       (unsigned)(pf_c0_clouds / f), (unsigned)(pf_c0_tris / f),
+			       (unsigned)(pf_present / f), (unsigned)(pf_bufwait / f),
+			       (unsigned)(pf_join / f));
+			printf("  CORE1 %2u%%: clouds %5u tris %5u | IDLE token %5u    (frame %u us over %u)\n",
+			       (unsigned)(100u * c1busy / wall), (unsigned)(pf_c1_clouds / f),
+			       (unsigned)(pf_c1_tris / f), (unsigned)(pf_c1_wait / f),
+			       (unsigned)(wall / f), (unsigned)wall);
+			pf_input=pf_bufwait=pf_cb=pf_render=pf_present=0;
+			pf_exec=pf_c0_clouds=pf_c0_tris=pf_join=0;
+			pf_c1_wait=pf_c1_clouds=pf_c1_tris=0;
 			frames      = 0;
 			fps_mark_ms = now_ms;
 		}
