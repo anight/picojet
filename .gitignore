@@ -1,0 +1,5 @@
+# CMake build tree
+/build/
+
+# The reference renderer, explored but not part of the build
+/3d-renderer-in-c/

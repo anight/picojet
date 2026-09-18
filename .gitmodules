@@ -1,0 +1,6 @@
+[submodule "Jet"]
+	path = Jet
+	url = https://github.com/CubeCoders/Jet
+[submodule "picosdl"]
+	path = picosdl
+	url = git@github.com:anight/picosdl.git
