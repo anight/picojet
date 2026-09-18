@@ -455,7 +455,7 @@ int main(void)
 	SDL_Color band_fg = { 200, 220, 255, SDL_ALPHA_OPAQUE };
 	SDL_Color band_bg = {   0,   0,   0, SDL_ALPHA_OPAQUE };
 	PSDL_StatusBands(SDL_TRUE, band_fg, band_bg);
-	PSDL_SetFooterText("stick: left / right");
+	PSDL_SetFooterText("github.com/anight/picojet");
 
 	clouds_init();
 	printf("picojet: clouds ready\n");

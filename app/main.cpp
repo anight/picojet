@@ -325,7 +325,7 @@ int main(void)
 	SDL_Color band_fg = { 200, 220, 255, SDL_ALPHA_OPAQUE };
 	SDL_Color band_bg = {   0,   0,   0, SDL_ALPHA_OPAQUE };
 	PSDL_StatusBands(SDL_TRUE, band_fg, band_bg);
-	PSDL_SetFooterText("picojet - Jet 3D on RP2350");
+	PSDL_SetFooterText("github.com/anight/picojet");
 
 	/* ------------------------------------------------------ scene setup */
 
@@ -733,10 +733,6 @@ int main(void)
 			       g_last_rasterized,
 			       steering ? " [steering]" : "");
 
-			char footer[48];
-			snprintf(footer, sizeof(footer), "%s - %d tris",
-			         g_models[modelIndex].name, g_models[modelIndex].triCount);
-			PSDL_SetFooterText(footer);
 			frames      = 0;
 			fps_mark_ms = now_ms;
 		}
