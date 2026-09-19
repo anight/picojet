@@ -1,5 +1,12 @@
 # picojet
 
+<p align="center">
+  <a href="https://youtube.com/shorts/BPHVAzR6nX4">
+    <img src="https://img.youtube.com/vi/BPHVAzR6nX4/oardefault.jpg" width="300"
+         alt="picojet running on a Pico 2 W — click to play">
+  </a>
+</p>
+
 A 3D software rasteriser on a Raspberry Pi Pico 2 W, driving an ST7789 panel at
 320×200 in direct colour, using both cores.
 
