@@ -171,10 +171,35 @@ place: centring the stick stops the sky dead under a wing that is still down.
 One rate constant, `ROLL_RESPONSE`, is the only inertia in the model and the
 heading inherits it.
 
+### Three aircraft
+
+The A button, or the stick's own click when that is all there is, cycles the
+F-22, the EF-2000 and the F-117.
+
+Switching allocates nothing. Both meshes are reserved for the largest aircraft in
+the table before any of them is loaded, and `std::vector` keeps its capacity
+across `clear()`, so a change is a refill. The render queue is grown once at
+startup on the aircraft with the most triangles, while the heap is still
+pristine — it needs one contiguous block, and grown after a few changes it makes
+a large request into a heap that has been handing out and taking back meshes of
+assorted sizes, and fails with plenty free and none of it adjacent.
+
+The viewer's biplane is not in the set. At 597 triangles its render queue is two
+and a half times the largest of these, and this demo has spent on a cloud deck
+and a second framebuffer the RAM the viewer has for its heap. It runs out.
+
 ### The afterburner
 
-Two plumes off the mesh's own nozzle rings, each a pair of ribbons crossed at
-right angles. A cone of any decent roundness costs ten times the triangles for a
+Plumes off each mesh's own nozzle rings — found by looking at what the vertices
+do at the back of the model, not guessed — each a pair of ribbons crossed at
+right angles.
+
+How many an aircraft gets is a question about the aircraft. The F-22 and the
+EF-2000 have two afterburning engines each, so two. The F-117 has two engines and
+no afterburner at all: its exhausts are wide slots that mix the efflux with cold
+air precisely so there is nothing to see, which is most of the point of the
+aircraft, so it gets none. The width profile is written for one nozzle radius and
+scaled to whatever the current aircraft's is. A cone of any decent roundness costs ten times the triangles for a
 shape the eye cannot tell apart at this size, and a single flat ribbon vanishes
 when the aircraft banks it edge-on.
 

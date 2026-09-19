@@ -39,6 +39,10 @@
 
 #include "assets/mesh_f22.h"
 #include "assets/tex_f22.h"
+#include "assets/mesh_efa.h"
+#include "assets/tex_efa.h"
+#include "assets/mesh_f117.h"
+#include "assets/tex_f117.h"
 
 using namespace Renderer;
 
@@ -49,11 +53,75 @@ using namespace Renderer;
 /*
  * Which way the mesh's nose points, as a yaw in degrees.
  *
- * f22.obj's long axis is X with the nose toward +X, and this turns it to put the
- * nose down +Z - away from the camera, so the aircraft flies into the distance
- * rather than at the viewer.
+ * Every mesh here has its long axis on X with the nose toward +X - checked, not
+ * assumed: at each end of the bounding box the nose is the few vertices that
+ * share one z, and the tail is the wide spread. This turns it to put the nose
+ * down +Z, away from the camera, so the aircraft flies into the distance rather
+ * than at the viewer.
  */
 static constexpr int32_t PLANE_YAW_DEG = 270;
+
+/* ------------------------------------------------------------- aircraft */
+
+/*
+ * The aircraft, and where each one's fire comes from.
+ *
+ * The nozzle is read off the mesh rather than guessed - it is the vertex ring on
+ * the aft face of the engine, and every one of these was found by looking at
+ * what the vertices actually do at the back of the model.
+ *
+ * How many plumes an aircraft gets is a question about the aircraft, not about
+ * the mesh:
+ *
+ *   F-22       two engines, afterburning. Two plumes.
+ *   EF-2000    two engines, afterburning. Two plumes, closer together and
+ *              lower than the F-22's - its nozzles sit under the tail boom.
+ *   F-117      two engines and no afterburner at all. Its exhausts are wide
+ *              slots that mix the efflux with cold air precisely so there is
+ *              nothing to see, which is most of the point of the aircraft.
+ *              Drawing fire on it would be drawing the one thing it was built
+ *              not to have. None.
+ *
+ * The biplane from the viewer is not here. At 597 triangles it needs a render
+ * queue two and a half times the largest of these, and this demo has a cloud
+ * deck and two framebuffers in the RAM the viewer spends on its heap.
+ *
+ * `nozzles` is a count rather than a flag because a single-engine jet wants one
+ * plume on the centreline, and the build below handles that - though nothing in
+ * this set is one.
+ */
+struct PlaneDef {
+	const char     *name;
+	const int16_t (*verts)[8];
+	int             vertCount;
+	const uint16_t(*tris)[3];
+	int             triCount;
+	const uint16_t *tex;
+	int             texW, texH;
+
+	int      nozzles;                     /* 0, 1 or 2 */
+	int16_t  nozzleX, nozzleY, nozzleZ;   /* mouth, in mesh units; z is mirrored */
+	int16_t  nozzleR;                     /* its radius, which scales the plume */
+};
+
+static const PlaneDef g_planes[] = {
+	{ "F-22", mesh_f22_verts, MESH_F22_VERTS, mesh_f22_tris, MESH_F22_TRIS,
+	  tex_f22_data, TEX_F22_W, TEX_F22_H,
+	  2, -200, -25, 26, 14 },
+
+	{ "EF-2000", mesh_efa_verts, MESH_EFA_VERTS, mesh_efa_tris, MESH_EFA_TRIS,
+	  tex_efa_data, TEX_EFA_W, TEX_EFA_H,
+	  2, -224, -44, 15, 13 },
+
+	{ "F-117", mesh_f117_verts, MESH_F117_VERTS, mesh_f117_tris, MESH_F117_TRIS,
+	  tex_f117_data, TEX_F117_W, TEX_F117_H,
+	  0, 0, 0, 0, 0 },
+};
+
+static constexpr int PLANE_COUNT = (int)(sizeof g_planes / sizeof *g_planes);
+
+/* Whose nozzles the plume geometry is currently built around. */
+static const PlaneDef *g_plane = &g_planes[0];
 
 /*
  * Where the aircraft sits, and how far the camera is above it.
@@ -205,9 +273,11 @@ static constexpr int FLAME_STATIONS = 5;
 static constexpr int FLAME_SEGMENTS = FLAME_STATIONS - 1;
 
 /*
- * Distance aft of the nozzle, and the half-width there, at full burn. The last
- * is not zero because a zero-width quad is a degenerate triangle, and 3 units is
- * a point.
+ * Distance aft of the nozzle, and the half-width there, at full burn. The widths
+ * are for a nozzle of radius FLAME_REF_R and are scaled to whatever the current
+ * aircraft's is, so a smaller engine gets a proportionally thinner plume without
+ * a second profile to maintain. The last is not zero because a zero-width quad is
+ * a degenerate triangle, and 3 units is a point.
  *
  * The length is set by where the plume ends up on screen rather than by what an
  * afterburner looks like from the side. It grows toward the camera, so
@@ -219,10 +289,8 @@ static constexpr int FLAME_SEGMENTS = FLAME_STATIONS - 1;
  */
 static const int16_t flame_aft[FLAME_STATIONS]  = { 0, 30, 75, 130, 190 };
 static const int16_t flame_half[FLAME_STATIONS] = { 14, 12,  9,   6,   3 };
+static constexpr int  FLAME_REF_R = 14;   /* the radius those widths are drawn for */
 
-static constexpr int16_t FLAME_X = -200;   /* nozzle face, local units */
-static constexpr int16_t FLAME_Y =  -25;
-static constexpr int16_t FLAME_Z =   26;   /* and its mirror */
 
 /*
  * The flame texture, and what its two axes are for.
@@ -346,15 +414,21 @@ static inline int flame_index(int side, int ribbon, int station, int edge)
  */
 static void flame_shape(Object &flame, int side, float burn, int32_t phase, int32_t S)
 {
-	const int32_t z = (side ? FLAME_Z : -FLAME_Z) * S;
+	/* One engine sits on the centreline; two straddle it. */
+	const int32_t zc = (g_plane->nozzles == 1)
+	                 ? 0
+	                 : (side ? g_plane->nozzleZ : -g_plane->nozzleZ);
+	const int32_t z  = zc * S;
+
+	const float rk = (float)g_plane->nozzleR / (float)FLAME_REF_R;
 
 	for (int ribbon = 0; ribbon < 2; ++ribbon) {
 		for (int i = 0; i < FLAME_STATIONS; ++i) {
 			/* The nozzle mouth is welded to the aircraft and never moves; the
 			 * surge grows from it, so the scale is weighted by how far aft the
 			 * station is. */
-			const int32_t x  = (int32_t)(FLAME_X - (int)(flame_aft[i] * burn)) * S;
-			const float   wk = 1.0f + (burn - 1.0f) * ((float)i / FLAME_STATIONS);
+			const int32_t x  = (int32_t)(g_plane->nozzleX - (int)(flame_aft[i] * burn)) * S;
+			const float   wk = rk * (1.0f + (burn - 1.0f) * ((float)i / FLAME_STATIONS));
 			const int32_t r  = (int32_t)(flame_half[i] * wk) * S;
 
 			/* Along the plume, so the ramp lands where it belongs. 1000 rather
@@ -366,9 +440,9 @@ static void flame_shape(Object &flame, int side, float burn, int32_t phase, int3
 				const int32_t d = edge ? r : -r;
 				Object::Vertex &vx = flame.vertices[flame_index(side, ribbon, i, edge)];
 
-				vx.position = ribbon == 0
-				            ? Vector3{ x, (int32_t)FLAME_Y * S + d, z }
-				            : Vector3{ x, (int32_t)FLAME_Y * S,     z + d };
+				const int32_t y = (int32_t)g_plane->nozzleY * S;
+				vx.position = ribbon == 0 ? Vector3{ x, y + d, z }
+				                          : Vector3{ x, y,     z + d };
 
 				/* A little spread across the ribbon so the two edges are at
 				 * different moments and the turbulence is not a flat band. */
@@ -379,19 +453,35 @@ static void flame_shape(Object &flame, int side, float burn, int32_t phase, int3
 }
 
 /*
- * Build both plumes. The material is the caller's because it has to outlive this.
+ * Rebuild the plumes for the aircraft now loaded.
+ *
+ * Called on every change rather than once, because the engine count and the
+ * nozzle position both move. The vectors keep whatever capacity they reached, so
+ * this reshuffles indices and touches no allocator - which matters, because the
+ * mesh next to it is being refilled at the same moment and a heap in pieces is
+ * how the model viewer used to fail.
+ *
+ * An aircraft with no exhaust to show gets the object disabled rather than
+ * removed: Jet skips a disabled object in one test, and taking it out of the
+ * scene list and putting it back is churn for the same result.
  */
 static void build_flames(Object &flame, Material *mat, int32_t S)
 {
-	flame.vertices.resize(2 * 2 * FLAME_STATIONS * 2);
-	flame.triangles.reserve(2 * 2 * FLAME_SEGMENTS * 2);
+	flame.vertices.clear();
+	flame.triangles.clear();
+
+	flame.enabled = (g_plane->nozzles > 0);
+	if (!flame.enabled)
+		return;
+
+	flame.vertices.resize((size_t)g_plane->nozzles * 2 * FLAME_STATIONS * 2);
 
 	/* Nothing here is lit, so the normal is never read; it still has to be a
 	 * legal value rather than zero, which some paths normalise. */
 	for (auto &v : flame.vertices)
 		v.normal = { 0, 1024, 0 };
 
-	for (int side = 0; side < 2; ++side) {
+	for (int side = 0; side < g_plane->nozzles; ++side) {
 		flame_shape(flame, side, 1.0f, 0, S);
 
 		for (int ribbon = 0; ribbon < 2; ++ribbon) {
@@ -430,7 +520,10 @@ static constexpr float FLAME_BOIL = 11000.0f;   /* texture time-axis units per s
 
 static void flames_update(Object &flame, float t, int32_t S)
 {
-	for (int side = 0; side < 2; ++side) {
+	if (!flame.enabled)
+		return;
+
+	for (int side = 0; side < g_plane->nozzles; ++side) {
 		const float p    = side ? 2.39f : 0.0f;
 		const float surge = 0.58f * sinf(t * 44.0f + p)
 		                  + 0.30f * sinf(t * 73.0f + p * 1.7f)
@@ -494,44 +587,119 @@ int main(void)
 	scene.setDirectionalLight(&sun);
 	scene.setAmbientLight(&amb);
 
-	Texture  texF22(TEX_F22_W, TEX_F22_H,
-	                const_cast<uint16_t *>(tex_f22_data), false, 0, false, CLAMP);
-	Material matF22(0xFFFF, &texF22);
-	matF22.shadingMode = ShadingMode::GOURAUD;
-	matF22.specular    = 48;
+	/*
+	 * One Texture and one Material for the aircraft, retargeted on each change
+	 * rather than rebuilt. Every texture is in flash and Jet only reads texel
+	 * data, so switching aircraft is three stores.
+	 */
+	Texture  texPlane(TEX_F22_W, TEX_F22_H,
+	                  const_cast<uint16_t *>(tex_f22_data), false, 0, false, CLAMP);
+	Material matPlane(0xFFFF, &texPlane);
+	matPlane.shadingMode = ShadingMode::GOURAUD;
+	matPlane.specular    = 48;
 
 	const int32_t S = JET32_WORLD_SCALE;
-
-	Object plane;
-	plane.vertices.reserve(MESH_F22_VERTS);
-	plane.triangles.reserve(MESH_F22_TRIS);
-	for (int i = 0; i < MESH_F22_VERTS; ++i) {
-		const int16_t *v = mesh_f22_verts[i];
-		Object::Vertex vert;
-		vert.position = { (int32_t)v[0] * S, (int32_t)v[1] * S, (int32_t)v[2] * S };
-		vert.uv       = { (int32_t)v[3], (int32_t)v[4] };
-		vert.normal   = { (int32_t)v[5], (int32_t)v[6], (int32_t)v[7] };
-		plane.addVertex(vert);
-	}
-	for (int i = 0; i < MESH_F22_TRIS; ++i)
-		plane.addTriangle(mesh_f22_tris[i][0], mesh_f22_tris[i][1],
-		                  mesh_f22_tris[i][2], &matF22);
-	plane.calculateBoundingBox();
-	scene.addObject(&plane);
 
 	flame_texture_init();
 	Texture  texFlame(FLAME_TEX_W, FLAME_TEX_H, s_flame_tex);
 	Material matFlame(0xFFFF, &texFlame);
 	matFlame.shadingMode = ShadingMode::UNLIT;
 
+	Object plane;
 	Object flame;
-	build_flames(flame, &matFlame, S);
+
+	/*
+	 * Size both meshes for the largest aircraft in the table before loading any
+	 * of them, so a change is a refill rather than an allocation. std::vector
+	 * keeps its capacity across clear(), so after this nothing here asks the
+	 * allocator for anything again, and cycling cannot leave the heap in pieces.
+	 */
+	{
+		int maxVerts = 0, maxTris = 0;
+		for (int i = 0; i < PLANE_COUNT; ++i) {
+			if (g_planes[i].vertCount > maxVerts) maxVerts = g_planes[i].vertCount;
+			if (g_planes[i].triCount  > maxTris)  maxTris  = g_planes[i].triCount;
+		}
+		plane.vertices.reserve((size_t)maxVerts);
+		plane.triangles.reserve((size_t)maxTris);
+		flame.vertices.reserve(2 * 2 * FLAME_STATIONS * 2);
+		flame.triangles.reserve(2 * 2 * FLAME_SEGMENTS * 2);
+	}
+
+	scene.addObject(&plane);
 	scene.addObject(&flame);
 
+	auto load_plane = [&](int index) {
+		g_plane = &g_planes[index];
+
+		texPlane.width  = g_plane->texW;
+		texPlane.height = g_plane->texH;
+		texPlane.data   = const_cast<uint16_t *>(g_plane->tex);
+
+		plane.vertices.clear();
+		plane.triangles.clear();
+		for (int i = 0; i < g_plane->vertCount; ++i) {
+			const int16_t *v = g_plane->verts[i];
+			Object::Vertex vert;
+			vert.position = { (int32_t)v[0] * S, (int32_t)v[1] * S, (int32_t)v[2] * S };
+			vert.uv       = { (int32_t)v[3], (int32_t)v[4] };
+			vert.normal   = { (int32_t)v[5], (int32_t)v[6], (int32_t)v[7] };
+			plane.addVertex(vert);
+		}
+		for (int i = 0; i < g_plane->triCount; ++i)
+			plane.addTriangle(g_plane->tris[i][0], g_plane->tris[i][1],
+			                  g_plane->tris[i][2], &matPlane);
+		plane.calculateBoundingBox();
+
+		build_flames(flame, &matFlame, S);
+
+		printf("picojet: %s - %d verts, %d tris, %d plume%s | heap %u KB\n",
+		       g_plane->name, g_plane->vertCount, g_plane->triCount,
+		       g_plane->nozzles, g_plane->nozzles == 1 ? "" : "s",
+		       (unsigned)(mallinfo().uordblks / 1024));
+	};
+
+	/*
+	 * Grow Jet's render queue on the biggest aircraft before anything else has
+	 * been asked of the heap.
+	 *
+	 * The queue holds every submitted triangle and needs one contiguous block.
+	 * Grown first it reaches the size the largest mesh needs and keeps it;
+	 * grown after a few changes it makes a single large request into a heap
+	 * that has been handing out and taking back meshes of assorted sizes, and
+	 * fails with plenty free and none of it adjacent.
+	 */
+	int planeIndex = 0;
 	{
-		struct mallinfo mi = mallinfo();
-		printf("picojet: F22 %d verts, %d tris | heap %u KB used\n",
-		       MESH_F22_VERTS, MESH_F22_TRIS, (unsigned)(mi.uordblks / 1024));
+		int biggest = 0;
+		for (int i = 1; i < PLANE_COUNT; ++i)
+			if (g_planes[i].triCount > g_planes[biggest].triCount)
+				biggest = i;
+
+		printf("picojet: warming the render queue on the %s, %d triangles\n",
+		       g_planes[biggest].name, g_planes[biggest].triCount);
+
+		load_plane(biggest);
+		plane.setRotation(0, PLANE_YAW_DEG, 0);
+		plane.setPosition(0, 0, PLANE_Z);
+		flame.setRotation(0, PLANE_YAW_DEG, 0);
+		flame.setPosition(0, 0, PLANE_Z);
+		g_camera.setPosition(0, CAM_HEIGHT, 0);
+		g_camera.setRotation(0, 0, 0);
+		scene.setFramebuffer(g_framebuffer[0]);
+		scene.prepareFrame();
+
+		printf("picojet: queue warmed, %d triangles | heap %u KB\n",
+		       scene.lastFrameDrawnTriangles, (unsigned)(mallinfo().uordblks / 1024));
+
+		if (scene.lastFrameDrawnTriangles > MAX_QUEUED_TRIS) {
+			printf("picojet: %d queued triangles exceeds MAX_QUEUED_TRIS (%d)\n",
+			       scene.lastFrameDrawnTriangles, MAX_QUEUED_TRIS);
+			fflush(stdout);
+			for (;;) { }
+		}
+
+		load_plane(planeIndex);
 	}
 
 	multicore_launch_core1(core1_worker);
@@ -553,6 +721,7 @@ int main(void)
 	/* ------------------------------------------------------- frame loop */
 
 	float  burn_t      = 0.0f;   /* the afterburner's own clock */
+	int    button_was_down = 0;
 	float  yaw         = 0.0f;   /* heading, radians */
 	float  bank        = 0.0f;   /* what the aeroplane shows for it, degrees */
 	int    back_index  = 0;
@@ -591,6 +760,26 @@ int main(void)
 		float stick = 0.0f;
 		if (ax > DEADZONE || ax < -DEADZONE)
 			stick = (float)ax / 32768.0f;
+
+		/*
+		 * Next aircraft. A on a pad, or the stick's own click when that is all
+		 * there is - picosdl reports the analog stick as a plain joystick, and
+		 * pressing it down is button 0.
+		 *
+		 * On the edge, not the level, or holding it would run through the whole
+		 * table in a fraction of a second.
+		 */
+		int button = 0;
+		if (controller)
+			button = SDL_GameControllerGetButton(controller, SDL_CONTROLLER_BUTTON_A);
+		else if (joystick)
+			button = SDL_JoystickGetButton(joystick, 0);
+
+		if (button && !button_was_down) {
+			planeIndex = (planeIndex + 1) % PLANE_COUNT;
+			load_plane(planeIndex);
+		}
+		button_was_down = button;
 
 		/*
 		 * The stick commands a bank, and the aircraft rolls toward it rather
@@ -670,8 +859,9 @@ int main(void)
 
 		++frames;
 		if (now_ms - fps_mark_ms >= 1000) {
-			printf("picojet: %u fps, heading %4d deg, bank %3d, %d tris\n",
+			printf("picojet: %u fps, %s, heading %4d deg, bank %3d, %d tris\n",
 			       (unsigned)(frames * 1000 / (now_ms - fps_mark_ms)),
+			       g_plane->name,
 			       ((int)(yaw * 57.2958f) % 360 + 360) % 360,
 			       (int)bank, scene.lastFrameDrawnTriangles);
 			frames      = 0;
