@@ -7,321 +7,359 @@
   </a>
 </p>
 
-A 3D software rasteriser on a Raspberry Pi Pico 2 W, driving an ST7789 panel at
-320×200 in direct colour, using both cores.
+Real-time 3D software rasterisation on a Raspberry Pi Pico 2 W, rendering
+320×200 in 16-bit direct colour to an ST7789 panel across both CPU cores.
 
-It is a frontend: [Jet](https://github.com/CubeCoders/Jet) fills a framebuffer,
-[picosdl](https://github.com/anight/picosdl) owns the panel and the input, and
-this is what sits between them. Most of the lines explain a decision.
+## Contents
 
-Two programs:
+- [Components](#components)
+- [Hardware](#hardware)
+- [Programs](#programs)
+- [Building](#building)
+- [Architecture](#architecture)
+- [Memory](#memory)
+- [Assets](#assets)
+- [Cloud background](#cloud-background)
+- [Configuration](#configuration)
+- [Measured performance](#measured-performance)
+- [Licence](#licence)
 
-| | |
+## Components
+
+| Component | Role | Licence |
+|---|---|---|
+| [Jet](https://github.com/CubeCoders/Jet) | Fixed-point software rasteriser. Submodule. | AGPL-3.0-or-later |
+| [picosdl](https://github.com/anight/picosdl) | SDL2 subset for RP2040/RP2350: display, input, timing. Submodule. | BSD-2-Clause |
+| [pio-st7789](https://github.com/anight/pio-st7789) | PIO/DMA ST7789 driver. Submodule of picosdl. | BSD-2-Clause |
+| picojet | This repository: application layer, asset pipeline, cloud renderer. | AGPL-3.0-or-later |
+
+## Hardware
+
+| Item | Detail |
 |---|---|
-| `picojet` | a model viewer - ten meshes, one at a time, spinning on two axes. **68 fps**, which is the panel link's ceiling rather than the processor's. |
-| `picojet-flight` | an F22 over a cloud deck, flown with the stick. **47 fps**, and here it is the processor. |
+| Board | Raspberry Pi Pico 2 W (RP2350: dual Cortex-M33 at 150 MHz, 520 KB SRAM, 4 MB flash) |
+| Display | ST7789, 240×320, driven over PIO SPI with DMA |
+| Input | Analogue joystick on the ADC, or an Adafruit Seesaw I2C gamepad |
+| Programmer | CMSIS-DAP probe |
 
-## The one idea
+Pin assignments are defined in `picosdl/backend/pico/board.h`.
 
-Jet renders RGB565. The ST7789 wants RGB565. Nothing converts anything.
+The canvas is 320×200, letterboxed into the 240-pixel panel height at y=20.
+picosdl draws a status band in each remaining strip: frame rate and per-core load
+above, a caption below.
 
-That identity is not free by default, and getting it is most of the work. It
-needed a 16bpp mode in the display driver, where the DMA reads a framebuffer and
-hands it to the panel untouched, and a matching `PSDL_COLOR_DEPTH=16` in picosdl,
-where a pixel is an RGB565 value and the client owns the buffer.
+## Programs
 
-With both, Jet's framebuffer *is* the thing the DMA reads. No pass converts,
-repacks or copies a pixel between the rasteriser and the glass.
+| Program | Description |
+|---|---|
+| `picojet` | Model viewer. Nine textured meshes, displayed one at a time. |
+| `picojet-flight` | Flight demonstration. A jet aircraft over a procedurally generated cloud deck. |
 
-## Both cores
+### picojet
 
-Jet's `Scene::render()` takes a `RasterExecutor` — a hook replacing the raster
-pass, which must join its workers and publish statistics before returning. With
-audio compiled out of picosdl, core 1 is free to be one of those workers: core 0
-prepares the frame and rasterises the top half, core 1 the bottom.
+The model advances every six seconds, or immediately on the gamepad's A button.
+It rotates continuously at 43°/s about X and 61°/s about Y, so that every face
+passes the camera within its display period.
 
-This is safe because `Z_BUFFERING` is off. The two bands write disjoint rows and
-share nothing else, which is the condition `rasterizeBand()` documents. Jet's own
-`scene_texture_queue` test, built against this `JetConfig.hpp`, confirms banded
-output is pixel-identical to a whole-frame render across 144 frames.
+The camera orbits the origin. Horizontal stick deflection controls azimuth,
+vertical deflection controls height. With the stick centred the camera drifts at
+0.35 rad/s so that the board demonstrates itself unattended.
 
-The handshake is the inter-core FIFO rather than a flag in memory: it is a
-hardware mailbox with the ordering already guaranteed, where a volatile flag would
-need explicit barriers to say the same thing.
-
-## Two framebuffers
-
-125 KB each, and worth every byte. With one, the frame is a push followed by a
-render, serially — core 0 measured 49% idle waiting for the panel. With two, Jet
-rasterises into the back buffer while the DMA reads the front, and the push stops
-costing the frame anything the render was not already spending.
-
-|                  | `.bss`  | fps   |
-|------------------|---------|-------|
-| 1 framebuffer    | 240,088 | 29–32 |
-| 2 framebuffers   | 368,088 | 56–58 |
-
-(at 125 MHz; see the clock below)
-
-`PICOJET_FRAMEBUFFERS` selects it. The loop differs only in how it learns the
-back buffer is free: at 1 that is `PSDL_PresentSync()`, which blocks and which
-picosdl counts as core 0 idle; at 2 it is a poll on `PSDL_BufferBusy()`, which
-never actually waits — the back buffer is by construction not the one in flight —
-but is written that way because it is correct for any number of buffers.
-
-Most of what pays for the second buffer is the z-buffer this configuration does
-not have.
-
-## The models
-
-Ten, shown one at a time, cycling on a timer or the gamepad's A button. The
-flight demo uses one of them, the F22.
-
-| model | triangles | source |
+| Model | Triangles | Source |
 |---|---|---|
-| cube, f117, f22, efa, sphere, crab | 12–498 | the [pikuma course](https://pikuma.com/courses/learn-3d-computer-graphics-programming) renderer |
-| radio, column, biplane | 95–597 | [OpenGameArt](https://opengameart.org), CC0 |
+| cube | 12 | [pikuma](https://pikuma.com/courses/learn-3d-computer-graphics-programming) course renderer |
+| radio | 95 | OpenGameArt, CC0 |
+| f117 | 134 | pikuma |
+| f22 | 200 | pikuma |
+| column | 212 | OpenGameArt, CC0 |
+| efa | 224 | pikuma |
+| crab | 476 | pikuma |
+| sphere | 498 | pikuma |
+| biplane | 597 | OpenGameArt, CC0 |
 
-`tools/convert_assets.py` turns `.obj` and `.png` into C arrays, because there is
-no filesystem here and Jet's own `ObjLoader` reads files. It de-indexes — an
-`.obj` indexes position, uv and normal separately where Jet's `Object` has one
-vertex array carrying all three — normalises every model to the same **bounding
-sphere** radius, and flips V, which `.obj` runs bottom-up and Jet samples
-top-down.
+### picojet-flight
 
-Normalising by bounding sphere rather than longest axis is what makes models
-*look* the same size. A cube fills its box; an aircraft is mostly empty air around
-a wingspan. Matching widths leaves the cube far larger on screen, and larger still
-once it rotates into its diagonal.
+The aircraft is fixed at the centre of the frame and the world turns around it.
+Horizontal stick deflection is the only control. The A button, or the joystick's
+own click, cycles the aircraft.
 
-Textures are 128×128 RGB565 and stay in flash — Jet only reads texel data, so a
-`const_cast` is the entire cost of a flash-resident texture.
-
-### Decimation, and when not to
-
-Models above a triangle budget are reduced by vertex clustering. It degrades an
-organic shape gracefully and a hard-surface one badly: a crab loses detail evenly
-across its bulk, while anything built from flat panels and sharp creases has
-exactly those destroyed, because the creases are where the clustering merges
-across. Vehicles at 2800 triangles reduced to 440 look broken; a sphere does not.
-Prefer models that never need it.
-
-Two details matter for colour-atlas textures, which many low-poly kits ship — one
-image of flat patches with every vertex pointing at the middle of one:
-
-* the decimator takes each cluster's UV from the member vertex nearest its centre
-  rather than averaging, because an averaged UV lands *between* two patches and
-  samples a colour that appears nowhere in the model;
-* `--tex-nearest` resamples without filtering, because smoothing an atlas down
-  bleeds neighbouring patches across their boundaries.
-
-## The flight demo
-
-The same renderer with a background that costs something, and it is the
-background that shapes everything else.
-
-### The sky is the clear
-
-`clouds.cpp` fills every pixel of the frame, so Jet's clear is turned off and the
-clouds replace it rather than being drawn over it. Two horizontal planes above
-the camera and one below, textured with a precomputed tileable fBm tile.
-
-That geometry is the reason it is affordable. For a pinhole camera the distance
-to a horizontal plane is constant along a scanline, so a row costs one divide of
-setup and then one add per axis per pixel - the floor mapper, which is as old as
-the technique gets. Colour is never computed per pixel either: a ladder indexed
-by `[fog band][density]` is built once and already contains the sky gradient,
-cloud shading, coverage curve and distance haze, so a pixel is two texture
-fetches and one ladder lookup.
-
-The base tile is 128 square rather than 256, which is what makes the tables fit
-beside two framebuffers.
-
-**The bilinear filter is the whole frame budget.** Filtering every row costs
-30 ms of a 33 ms frame. The rows that need it are the near ones, where a texel
-covers enough pixels for the grid to show; beyond that the mip chain is already
-resolving the detail and the interpolation is averaging texels that are nearly
-equal. `FILT_DUT` is the threshold in texels per pixel:
-
-| | clouds | fps |
+| Aircraft | Triangles | Exhaust plumes |
 |---|---|---|
-| 0.75 | 30 ms | 29 |
-| 0.42 | 21 ms | 38 |
-| **0.25** | 14 ms | 57 |
-| off | 13 ms | 60 |
+| F-22 | 200 | 2 |
+| EF-2000 | 224 | 2 |
+| F-117 | 134 | 0 |
 
-### One camera, two renderers
+Plume counts follow the aircraft. The F-22 and EF-2000 have two afterburning
+engines each. The F-117 has two engines and no afterburner: its exhausts are
+slots that mix efflux with cold air to suppress the infrared signature, so no
+flame is visible. Each nozzle position is taken from the vertex ring on the aft
+face of the engine in the mesh itself.
 
-The aircraft has to sit *in* the sky rather than in front of a picture of one,
-which means both renderers must project identically. `clouds.cpp` uses a focal
-length of 220 pixels; Jet's `setFOV()` derives its own as
-`(screenWidth/2) / tan(fov/2)`. Solving that for 220 over a 320-wide screen gives
-2·atan(160/220) = **72 degrees**.
+The biplane is absent from this program. Its render queue requires roughly two
+and a half times the memory of the largest aircraft here, which the cloud tables
+and the second framebuffer have already consumed.
 
-The camera is raised above the aircraft and stays **level** - raised, never
-pitched. Pitching would be the obvious way to look down at it, and it would break
-the sky: the cloud renderer pins its horizon to the middle row and has no notion
-of pitch, so tilting Jet's camera slides the two apart. Level and raised, both
-still look down +Z, so their vanishing point is the same pixel.
-
-Camera height and distance are tied together. The drop below the horizon is
-`height × focal / distance`, so closing the distance to make the aircraft larger
-also steepens the angle down to it; both scale by the same factor or it sinks out
-of frame.
-
-### Flying it
-
-The stick commands a **bank**, the aircraft rolls toward it through a first-order
-lag, and the **bank is what produces the yaw**. Driving the heading from the stick
-directly and animating the bank alongside it looks wrong in a way that is hard to
-place: centring the stick stops the sky dead under a wing that is still down.
-One rate constant, `ROLL_RESPONSE`, is the only inertia in the model and the
-heading inherits it.
-
-### Three aircraft
-
-The A button, or the stick's own click when that is all there is, cycles the
-F-22, the EF-2000 and the F-117.
-
-Switching allocates nothing. Both meshes are reserved for the largest aircraft in
-the table before any of them is loaded, and `std::vector` keeps its capacity
-across `clear()`, so a change is a refill. The render queue is grown once at
-startup on the aircraft with the most triangles, while the heap is still
-pristine — it needs one contiguous block, and grown after a few changes it makes
-a large request into a heap that has been handing out and taking back meshes of
-assorted sizes, and fails with plenty free and none of it adjacent.
-
-The viewer's biplane is not in the set. At 597 triangles its render queue is two
-and a half times the largest of these, and this demo has spent on a cloud deck
-and a second framebuffer the RAM the viewer has for its heap. It runs out.
-
-### The afterburner
-
-Plumes off each mesh's own nozzle rings — found by looking at what the vertices
-do at the back of the model, not guessed — each a pair of ribbons crossed at
-right angles.
-
-How many an aircraft gets is a question about the aircraft. The F-22 and the
-EF-2000 have two afterburning engines each, so two. The F-117 has two engines and
-no afterburner at all: its exhausts are wide slots that mix the efflux with cold
-air precisely so there is nothing to see, which is most of the point of the
-aircraft, so it gets none. The width profile is written for one nozzle radius and
-scaled to whatever the current aircraft's is. A cone of any decent roundness costs ten times the triangles for a
-shape the eye cannot tell apart at this size, and a single flat ribbon vanishes
-when the aircraft banks it edge-on.
-
-The plume is short because it grows *toward* the camera, and perspective works
-against it hard - a plume of the length a side-on photograph suggests reaches
-within a few hundred units of the lens and sweeps off the bottom of the frame as
-a pair of enormous wedges.
-
-One generated 64×32 texture, and the two axes do different jobs. **U runs along
-the plume and carries the colour ramp**; **V is time**, and the flame is animated
-by scrolling it. Baking both onto one axis means scrolling to animate the fire
-also scrolls the ramp, and the white-hot part marches down the plume and off the
-end; pinned to U it stays welded to the geometry while V boils underneath.
-
-`UNLIT` rather than the `ADDITIVE` mode Jet also offers, which is the obvious
-choice for a flame: an add against this sky saturates. The cloud deck is a bright
-lavender, so adding any hot colour pins every channel and the plume comes out
-white.
-
-## Memory, which is the whole game
-
-512 KB of SRAM. Two framebuffers take 250 KB of it, and what is left has to hold
-Jet's heap.
-
-Jet allocates, and it is worth knowing what for. `Object` owns `std::vector`s for
-the mesh, and `Scene` builds a per-frame render queue holding every triangle
-submitted — about **160 bytes per triangle**, roughly twice what the mesh costs.
-Neither needs a general allocator; the renderer knows its own bounds, and a
-fixed-capacity array sized at build time would do the same job. That it is a heap
-has consequences:
-
-* **A model has to be budgeted before it is built.** With exceptions compiled
-  out, a failed allocation inside `std::vector` does not return — it panics. The
-  check in `model_ram()` is a hard gate, and it counts the whole scene's
-  triangles, because the queue is per frame rather than per object.
-
-* **The largest model is loaded first.** The queue needs one contiguous block and
-  keeps whatever capacity it grows to. Grown while the heap is pristine it
-  reaches the size the biggest model needs and never grows again; grown late,
-  after meshes of assorted sizes have been loaded and freed around it, the single
-  large request fails with plenty free but none of it adjacent.
-
-Textures are the counter-example and the easy case: read-only, so they stay in
-flash and cost nothing.
+**Flight model.** The stick commands a bank angle. The aircraft rolls toward it
+through a first-order lag, and the resulting bank produces the yaw rate. A single
+constant, `ROLL_RESPONSE`, is the only inertia term; heading inherits it. Full
+deflection corresponds to 55° of bank and 0.9 rad/s of yaw.
 
 ## Building
+
+Requirements: the Raspberry Pi Pico SDK (`PICO_SDK_PATH`, or `~/.pico-sdk`),
+CMake 3.13 or later, Ninja, and the `arm-none-eabi` toolchain.
 
 ```bash
 git submodule update --init --recursive
 cmake -S . -B build -G Ninja
 cmake --build build
-picosdl/picodev.sh flash-and-logs build/picojet.elf        # the model viewer
-picosdl/picodev.sh flash-and-logs build/picojet-flight.elf # the flight demo
 ```
 
-Needs the Pico SDK (`PICO_SDK_PATH`, or `~/.pico-sdk`) and a CMSIS-DAP probe.
+Flashing requires a CMSIS-DAP probe:
 
-To regenerate the assets from source `.obj` and `.png`:
+```bash
+picosdl/picodev.sh flash-and-logs build/picojet.elf
+picosdl/picodev.sh flash-and-logs build/picojet-flight.elf
+```
+
+## Architecture
+
+### Direct-colour path
+
+Jet renders RGB565 and the ST7789 accepts RGB565. No stage between the
+rasteriser and the panel converts, repacks or copies a pixel: the DMA engine
+reads Jet's framebuffer directly.
+
+This requires `PSDL_COLOR_DEPTH=16` in picosdl, where a pixel is an RGB565 value
+and the client owns the buffer, and the 16bpp mode of `pio-st7789`, where the
+DMA hands framebuffer contents to the panel unaltered.
+
+### Dual-core rasterisation
+
+`Scene::render()` accepts a `RasterExecutor`, a hook that replaces the raster
+pass and is required to join its workers and publish statistics before
+returning. With audio compiled out of picosdl, core 1 is available as a second
+rasteriser: core 0 prepares the frame and rasterises rows 0–99, core 1
+rasterises rows 100–199.
+
+This is safe because `Z_BUFFERING` is disabled. The two bands write disjoint
+rows and share no per-pixel state, which is the condition `rasterizeBand()`
+documents. Jet's own `scene_texture_queue` test, built against this
+`JetConfig.hpp`, confirms that banded output is identical to a whole-frame
+render across 144 frames.
+
+The handshake uses the inter-core FIFO rather than a flag in memory. The FIFO is
+a hardware mailbox with ordering already guaranteed; an equivalent flag would
+require explicit memory barriers.
+
+Both programs report per-core load through picosdl's `PSDL_CpuIdle()` and
+`PSDL_CpuBusy()`, which bracket each core's blocking waits. Load is the
+complement of the bracketed intervals.
+
+### Double buffering
+
+Two framebuffers of 128,000 bytes each. Core 0 selects the buffer not currently
+being transmitted, polling `PSDL_BufferBusy()`, and rasterises into it while the
+DMA engine reads the other. Measured with a single buffer, core 0 spends
+approximately half of each frame blocked on the panel transfer.
+
+`PICOJET_FRAMEBUFFERS` selects between one and two. At 1 the program waits with
+`PSDL_PresentSync()`, which picosdl accounts as idle time on the calling core.
+
+### System clock
+
+`PICOJET_SYS_CLOCK_KHZ` defaults to 150000, the RP2350 SDK default.
+
+The ST7789 driver derives SCK from a PIO side-set at a clock divider of 1, so
+SCK is always half the system clock: 75 MHz against a rated maximum of 62.5 MHz,
+an overclock of 20%.
+
+The frame is bounded by this link rather than by the processor. Raising the
+clock from 125 MHz to 150 MHz shortens the panel transfer from 17.4 ms to
+14.5 ms and raises the observed ceiling from 57 fps to 68 fps.
+
+Tolerance of the overclock varies between panels. A panel that does not tolerate
+it displays torn, speckled or shifted pixels rather than failing outright. Build
+with `-DPICOJET_SYS_CLOCK_KHZ=125000` for an in-specification clock at both
+ends.
+
+## Memory
+
+The RP2350 provides 520 KB of SRAM, of which the two framebuffers occupy 250 KB.
+
+| Program | `.text` | `.bss` | Configured heap |
+|---|---:|---:|---:|
+| `picojet` | 651,548 | 343,292 | 163,840 |
+| `picojet-flight` | 351,580 | 397,912 | 49,152 |
+
+Jet allocates from the heap in two places. `Object` holds the mesh in
+`std::vector` members, and `Scene` builds a per-frame render queue containing
+every submitted triangle, at approximately 128 bytes per triangle across its
+three vectors. Exceptions are disabled, so a failed allocation terminates the
+program rather than returning.
+
+Two consequences govern how both programs load meshes.
+
+1. **A mesh must be budgeted before it is constructed.** `picojet` checks the
+   projected cost in `model_ram()` and reports models that do not fit rather
+   than attempting them. The check accounts for the whole scene's triangles,
+   because the render queue is per frame and not per object.
+
+2. **The largest mesh is loaded first.** The render queue requires one
+   contiguous allocation and retains whatever capacity it reaches. Grown while
+   the heap is unfragmented it reaches its maximum immediately; grown after
+   several meshes of differing sizes have been allocated and freed, the same
+   request fails with sufficient total free memory but no adjacent block.
+
+`picojet-flight` additionally reserves both mesh vectors for the largest
+aircraft in its table before loading any of them. Because `std::vector` retains
+capacity across `clear()`, changing aircraft performs no allocation at all.
+
+Textures are read-only and remain in flash, at no cost in SRAM.
+
+## Assets
+
+`tools/convert_assets.py` converts `.obj` and `.png` files into C arrays. There
+is no filesystem on the target, and Jet's own `ObjLoader` reads from files.
+
+The converter performs three transformations:
+
+- **De-indexing.** An `.obj` file indexes position, texture coordinate and
+  normal separately, whereas Jet's `Object` holds a single vertex array carrying
+  all three.
+- **Normalisation by bounding sphere.** Scaling to a common bounding sphere
+  radius, rather than to a common longest axis, makes models appear comparably
+  sized. A cube fills its bounding box; an aircraft is largely empty space
+  around a wingspan. Matching widths leaves the cube substantially larger on
+  screen, and larger still once rotated onto its diagonal.
+- **V-axis inversion.** `.obj` texture coordinates run bottom-up; Jet samples
+  top-down.
+
+Textures are emitted as 128×128 RGB565 arrays.
+
+Meshes exceeding a triangle budget can be reduced by vertex clustering
+(`--max-tris`). The technique degrades organic shapes acceptably and
+hard-surface shapes badly, because clustering merges across precisely the
+creases that define a panelled model. Two options exist for colour-atlas
+textures, which consist of flat patches with every vertex addressing the centre
+of one: each cluster takes its texture coordinate from the member vertex nearest
+the cluster centre rather than from an average, since an averaged coordinate
+falls between patches; and `--tex-nearest` resamples without filtering, since
+smoothing an atlas bleeds adjacent patches across their boundaries.
+
+To regenerate the assets:
 
 ```bash
 python3 tools/convert_assets.py --assets <dir> --out app/assets \
     --tex-size 128 --mesh-scale 270 --max-tris 600
 ```
 
+## Cloud background
+
+`app/clouds.cpp` renders a full-screen cloud deck. It writes every pixel it is
+given, so Jet's buffer clear is disabled and the sky replaces it.
+`tools/clouds.c` is the reference implementation the port derives from.
+
+The scene comprises two horizontal planes above the camera and one below,
+textured with a precomputed tileable fBm noise tile of 128×128 texels and a
+four-level mip chain. For a pinhole camera the distance to a horizontal plane is
+constant along a scanline and the texture coordinate is linear in x, so a row
+costs one division of setup followed by one addition per axis per pixel. The
+inner loop is entirely 16.16 fixed-point integer arithmetic; floating point
+appears only in per-row setup.
+
+Colour is never computed per pixel. A lookup table indexed by fog band and
+density is built once and already incorporates the sky gradient, cloud shading,
+coverage curve and distance haze, so a pixel costs two texture fetches and one
+table lookup.
+
+Both renderers must project identically, or the aircraft will not appear to
+occupy the sky. The cloud renderer uses a focal length of 220 pixels; Jet's
+`setFOV()` derives its own factor as `(screenWidth/2) / tan(fov/2)`. Solving for
+220 across a 320-pixel width gives a field of view of 72°.
+
+The camera is raised above the aircraft and held level. It is never pitched: the
+cloud renderer fixes its horizon at the middle row and has no concept of pitch,
+so tilting Jet's camera would separate the two. Camera height and distance scale
+together, since the aircraft's displacement below the horizon is
+`height × focal / distance`.
+
+**Bilinear filtering is the dominant cost.** `FILT_DUT` is the threshold in
+texels per pixel above which a row is filtered. Rows near the viewer require it;
+beyond that distance the mip chain already resolves the detail and interpolation
+averages nearly equal texels.
+
+| `FILT_DUT` | Cloud pass | Frame rate |
+|---|---:|---:|
+| 0.75 | 30 ms | 29 fps |
+| 0.42 | 21 ms | 38 fps |
+| **0.25** (default) | 14 ms | 57 fps |
+| disabled | 13 ms | 60 fps |
+
 ## Configuration
 
-Everything about the renderer is in `app/JetConfig.hpp`, with the reasoning next
-to each choice. The ones that shape the rest:
+### Build options
 
-* **`HALF_WIDTH_BUFFERS 0`** — the panel wants 320 full-width pixels per row, so
-  a half-width buffer would need the CPU to double every one on the way out,
-  which is exactly the copy this design exists to avoid.
-* **`Z_BUFFERING 0`, `SORT_TRIANGLES 1`** — saves 125 KB and is what makes the
-  two-core split safe.
-* **`PERSPECTIVE_CORRECT_TEXTURES 1`** — costs a divide per pixel and measures as
-  free here, because the frame is bound by the panel link rather than the
-  processor. Affine interpolation leaves texels sliding across a face as it
-  turns.
+| Option | Default | Effect |
+|---|---|---|
+| `PICOJET_FRAMEBUFFERS` | 2 | Framebuffers cycled by the renderer, 1 or 2 |
+| `PICOJET_SYS_CLOCK_KHZ` | 150000 | System clock; 125000 keeps the panel within specification |
 
-Together the first two forfeit `JET_FAST_SIMPLE_SPANS`, Jet's fastest path, which
-requires `HALF_WIDTH_BUFFERS` and `!LIGHTING`. That is a deliberate trade: this
-target cannot accept either condition.
+The build forces the following picosdl options: `PICOSDL_COLOR_DEPTH=16`,
+`PICOSDL_AUDIO=OFF` (core 1 is the second rasteriser),
+`PICOSDL_INPUT_BT_KEYBOARD=OFF`, `PICOSDL_INPUT_JOYSTICK=ON`,
+`PICOSDL_INPUT_GAMEPAD=ON`.
 
-## The clock
+### Renderer configuration
 
-`PICOJET_SYS_CLOCK_KHZ`, default **150000**.
+`app/JetConfig.hpp` carries the full set with per-option reasoning. The
+settings that determine the rest:
 
-150 MHz is the RP2350 SDK's own default, so the core is not being pushed — the
-panel is. The ST7789 driver clocks SCK from PIO sideset at clkdiv 1, so SCK is
-sysclk/2 always: 75 MHz against a rated 62.5, twenty per cent over.
+| Setting | Value | Rationale |
+|---|---|---|
+| `HALF_WIDTH_BUFFERS` | 0 | The panel requires 320 full-width pixels per row. A half-width buffer would oblige the CPU to duplicate every pixel on output, which is the copy this design exists to avoid. |
+| `Z_BUFFERING` | 0 | Saves 128 KB and permits the two-core split. |
+| `SORT_TRIANGLES` | 1 | Painter's algorithm in place of a depth buffer. |
+| `LIGHTING` | 1 | Directional and ambient lighting, Gouraud interpolation. |
+| `PERSPECTIVE_CORRECT_TEXTURES` | 1 | One division per pixel. Measures as free, the frame being bound by the panel link. Affine interpolation leaves texels sliding across a face as it turns. |
+| `BILINEAR_FILTER` | 0 | Texture magnification is point-sampled. |
+| `SCREEN_DOOR_ALPHA` | 1 | Transparency by ordered dither, avoiding a read-modify-write per pixel. |
+| `POSTFX_*` | 0 | All post-processing disabled. |
 
-It is worth it because the frame is bound by that link. The push is
-64000 × 34 / sysclk, so it falls from 17.4 ms to 14.5 and the ceiling rises from
-57 fps to 69 — measured, 56 becomes 68 on the models that reach it.
+The first two together forfeit `JET_FAST_SIMPLE_SPANS`, Jet's fastest raster
+path, which requires `HALF_WIDTH_BUFFERS` and `!LIGHTING`. Neither condition is
+acceptable on this target.
 
-This is a panel-by-panel judgement rather than a safe default in general. A panel
-that tolerates 20% over is not obliged to, and one that does not shows torn,
-speckled or shifted pixels rather than a blank screen. Build with
-`-DPICOJET_SYS_CLOCK_KHZ=125000` for a clock with nothing out of spec at either
-end, at 57 fps.
+## Measured performance
 
-## Hardware
+At 150 MHz with two framebuffers. Ranges reflect the varying screen coverage as
+each model rotates; the upper bound of 68 fps is the panel link's ceiling.
 
-A Pico 2 W with an ST7789 panel. Every pin is in
-`picosdl/backend/pico/board.h`. picosdl builds for all four Pico boards, though
-this frontend's memory budget assumes the RP2350's 512 KB.
+| `picojet` model | Triangles | Frame rate |
+|---|---:|---|
+| cube | 12 | 43–55 |
+| radio | 95 | 60–68 |
+| f117 | 134 | 67–68 |
+| f22 | 200 | 67–68 |
+| column | 212 | 50–62 |
+| efa | 224 | 65–68 |
+| crab | 476 | 34–65 |
+| sphere | 498 | 29–31 |
+| biplane | 597 | 48–67 |
+
+`picojet-flight` runs at 33–58 fps. Unlike the viewer it is bound by the
+processor rather than the panel, and the cloud pass dominates: of a
+21.5 ms frame, 17.5 ms is the two-core raster pass, 2.0 ms the transform and
+sort, 1.4 ms input polling, and 0.2 ms the panel handover.
 
 ## Licence
 
-**AGPL-3.0-or-later**, because it links [Jet](https://github.com/CubeCoders/Jet),
-which is AGPL. Anyone you distribute a binary to — including over a network — is
-entitled to the corresponding source of the whole work. CubeCoders sell a
-commercial Jet licence for those who cannot accept that; picojet itself is
-offered only under the AGPL.
+picojet is distributed under **AGPL-3.0-or-later**, because it links
+[Jet](https://github.com/CubeCoders/Jet), which is AGPL. Any recipient of a
+binary, including over a network, is entitled to the corresponding source of the
+whole work. CubeCoders offer a commercial Jet licence to parties who cannot
+accept that condition; picojet itself is offered only under the AGPL.
 
-The dependencies keep their own, more permissive terms: picosdl and `pio-st7789`
-are BSD-2-Clause, and are not affected by the licence of this frontend. The
-imported models are CC0 or come from the pikuma course renderer.
+Dependencies retain their own terms: picosdl and `pio-st7789` are BSD-2-Clause
+and are unaffected by the licence of this frontend. Imported models are CC0 or
+originate from the pikuma course renderer.
