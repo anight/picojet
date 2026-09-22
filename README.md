@@ -28,10 +28,10 @@ Real-time 3D software rasterisation on a Raspberry Pi Pico 2 W, rendering
 
 | Component | Role | Licence |
 |---|---|---|
-| [Jet](https://github.com/CubeCoders/Jet) | Fixed-point software rasteriser. Submodule. | AGPL-3.0-or-later |
+| [Jet](https://github.com/CubeCoders/Jet) | Fixed-point software rasteriser. Submodule. | MIT |
 | [picosdl](https://github.com/anight/picosdl) | SDL2 subset for RP2040/RP2350: display, input, timing. Submodule. | BSD-2-Clause |
 | [pio-st7789](https://github.com/anight/pio-st7789) | PIO/DMA ST7789 driver. Submodule of picosdl. | BSD-2-Clause |
-| picojet | This repository: application layer, asset pipeline, cloud renderer. | AGPL-3.0-or-later |
+| picojet | This repository: application layer, asset pipeline, cloud renderer. | BSD-2-Clause |
 
 ## Hardware
 
@@ -189,8 +189,8 @@ The RP2350 provides 520 KB of SRAM, of which the two framebuffers occupy 250 KB.
 
 | Program | `.text` | `.bss` | Configured heap |
 |---|---:|---:|---:|
-| `picojet` | 651,548 | 343,292 | 163,840 |
-| `picojet-flight` | 351,580 | 397,912 | 49,152 |
+| `picojet` | 649,532 | 343,300 | 163,840 |
+| `picojet-flight` | 349,564 | 397,920 | 49,152 |
 
 Jet allocates from the heap in two places. `Object` holds the mesh in
 `std::vector` members, and `Scene` builds a per-frame render queue containing
@@ -354,12 +354,9 @@ sort, 1.4 ms input polling, and 0.2 ms the panel handover.
 
 ## Licence
 
-picojet is distributed under **AGPL-3.0-or-later**, because it links
-[Jet](https://github.com/CubeCoders/Jet), which is AGPL. Any recipient of a
-binary, including over a network, is entitled to the corresponding source of the
-whole work. CubeCoders offer a commercial Jet licence to parties who cannot
-accept that condition; picojet itself is offered only under the AGPL.
+picojet is distributed under **BSD-2-Clause**. See `LICENSE`.
 
-Dependencies retain their own terms: picosdl and `pio-st7789` are BSD-2-Clause
-and are unaffected by the licence of this frontend. Imported models are CC0 or
-originate from the pikuma course renderer.
+Dependencies retain their own terms. [Jet](https://github.com/CubeCoders/Jet) is
+MIT, and its copyright notice must accompany any binary built from this
+repository. picosdl and `pio-st7789` are BSD-2-Clause. Imported models are CC0
+or originate from the pikuma course renderer.
