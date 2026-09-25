@@ -167,3 +167,77 @@ target_compile_definitions(picojet-flight PRIVATE
 pico_enable_stdio_uart(picojet-flight 1)
 pico_enable_stdio_usb(picojet-flight 1)
 pico_add_extra_outputs(picojet-flight)
+
+# ------------------------------------------------------------------ JetExamples
+#
+# CubeCoders' JetExamples, vendored under examples/, each with its own scene and
+# its own renderer configuration, running on a picosdl implementation of the
+# upstream runtime contract (examples/runtime/).
+#
+# Jet is compiled once per example rather than once for the project. JetConfig.hpp
+# is a set of compile-time switches and the examples disagree about them - depth
+# buffering, sorting, lighting, texturing and post-processing are exactly what
+# they demonstrate - so a single Jet build cannot serve them all.
+#
+# Each example's configuration is used as written, then examples/runtime/
+# JetConfigPico.hpp overrides the frame layout, which belongs to the display: the
+# examples render half-width interlaced fields for their scanout, this panel is
+# pushed whole frames.
+
+file(GLOB PICOJET_JET_SOURCES CONFIGURE_DEPENDS ${CMAKE_CURRENT_LIST_DIR}/Jet/src/*.cpp)
+
+# picojet_jet_example(name title [FRAMEBUFFERS 1|2])
+function(picojet_jet_example name title)
+    cmake_parse_arguments(EX "" "FRAMEBUFFERS" "" ${ARGN})
+    if (NOT EX_FRAMEBUFFERS)
+        set(EX_FRAMEBUFFERS 2)
+    endif()
+    set(src ${CMAKE_CURRENT_LIST_DIR}/examples/${name})
+    set(runtime ${CMAKE_CURRENT_LIST_DIR}/examples/runtime)
+    set(cfg ${CMAKE_CURRENT_BINARY_DIR}/examples/${name})
+
+    # Jet includes "JetConfig.hpp" by name. This one comes first on the path and
+    # layers the frame-layout overrides onto the example's own configuration,
+    # which is included by absolute path so it cannot be found by name instead.
+    file(WRITE ${cfg}/JetConfig.hpp
+"#pragma once
+#include \"${src}/firmware/JetConfig.hpp\"
+#include \"${runtime}/JetConfigPico.hpp\"
+")
+
+    add_library(jet-${name} STATIC ${PICOJET_JET_SOURCES})
+    target_include_directories(jet-${name} PUBLIC ${cfg} ${CMAKE_CURRENT_LIST_DIR}/Jet/src)
+    target_compile_options(jet-${name} PRIVATE -fno-math-errno)
+    set_property(TARGET jet-${name} PROPERTY INTERPROCEDURAL_OPTIMIZATION TRUE)
+
+    file(GLOB example_sources CONFIGURE_DEPENDS ${src}/*.cpp)
+    add_executable(example-${name} ${example_sources} ${runtime}/Runtime.cpp)
+    target_include_directories(example-${name} PRIVATE ${cfg} ${src} ${runtime})
+    target_compile_features(example-${name} PRIVATE cxx_std_17)
+    # ESP-IDF's headers bring <cstdio> in transitively and some scenes rely on
+    # it for std::printf; supplying it here keeps the scene sources unmodified.
+    target_compile_options(example-${name} PRIVATE -fno-math-errno
+        $<$<COMPILE_LANGUAGE:CXX>:-include> $<$<COMPILE_LANGUAGE:CXX>:cstdio>)
+    target_compile_definitions(example-${name} PRIVATE
+        PICOJET_SYS_CLOCK_KHZ=${PICOJET_SYS_CLOCK_KHZ}
+        PICOJET_EXAMPLE_NAME="${title}"
+        PICOJET_EXAMPLE_FRAMEBUFFERS=${EX_FRAMEBUFFERS})
+    target_link_libraries(example-${name} PRIVATE
+        jet-${name} picosdl pico_multicore hardware_watchdog)
+
+    pico_enable_stdio_uart(example-${name} 1)
+    pico_enable_stdio_usb(example-${name} 1)
+    pico_add_extra_outputs(example-${name})
+endfunction()
+
+# Measured on the board. The first seven fit alongside two framebuffers; the
+# last two need the second framebuffer's 128 KB for their render queues.
+picojet_jet_example(template-cube    "Rotating cube")
+picojet_jet_example(particles        "Particle Lab")
+picojet_jet_example(textured-boxes   "Textured crate")
+picojet_jet_example(texture-features "Texture Lab")
+picojet_jet_example(postfx-crt       "CRT / Arcade")
+picojet_jet_example(lod-billboards   "Woodland")
+picojet_jet_example(sprite-controls  "Air Mail")
+picojet_jet_example(tropical-island  "Tropical island" FRAMEBUFFERS 1)
+picojet_jet_example(sprites-blending "After Hours"     FRAMEBUFFERS 1)

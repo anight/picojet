@@ -31,6 +31,7 @@ Real-time 3D software rasterisation on a Raspberry Pi Pico 2 W, rendering
 | [Jet](https://github.com/CubeCoders/Jet) | Fixed-point software rasteriser. Submodule. | MIT |
 | [picosdl](https://github.com/anight/picosdl) | SDL2 subset for RP2040/RP2350: display, input, timing. Submodule. | BSD-2-Clause |
 | [pio-st7789](https://github.com/anight/pio-st7789) | PIO/DMA ST7789 driver. Submodule of picosdl. | BSD-2-Clause |
+| [JetExamples](https://github.com/CubeCoders/JetExamples) | Example scenes for Jet. Nine are vendored under `examples/`. | MIT |
 | picojet | This repository: application layer, asset pipeline, cloud renderer. | BSD-2-Clause |
 
 ## Hardware
@@ -54,6 +55,7 @@ above, a caption below.
 |---|---|
 | `picojet` | Model viewer. Nine textured meshes, displayed one at a time. |
 | `picojet-flight` | Flight demonstration. A jet aircraft over a procedurally generated cloud deck. |
+| `example-*` | Nine scenes from JetExamples, each a separate program. |
 
 ### picojet
 
@@ -104,6 +106,43 @@ through a first-order lag, and the resulting bank produces the yaw rate. A singl
 constant, `ROLL_RESPONSE`, is the only inertia term; heading inherits it. Full
 deflection corresponds to 55° of bank and 0.9 rad/s of yaw.
 
+### JetExamples
+
+Nine of the sixteen JetExamples scenes, each built as its own program. They run
+unattended and take no input. Each keeps the renderer configuration it was
+written with, so together they exercise features the two programs above leave
+disabled: bilinear filtering, texture addressing modes, palette cycling,
+particles, level of detail, sprites, blending, water reflections and CRT
+post-processing.
+
+| Program | Scene | Demonstrates | Framebuffers |
+|---|---|---|---:|
+| `example-template-cube` | Rotating cube | Minimal scene: camera and coloured geometry | 2 |
+| `example-particles` | Particle Lab | Additive sparks, gravity-driven spray, alpha fades, fixed pools, distance culling | 2 |
+| `example-textured-boxes` | Textured crate | Affine and perspective-correct mapping, nearest and bilinear sampling | 2 |
+| `example-texture-features` | Texture Lab | Wrap, clamp and zero addressing, colour keys, palette cycling, texture LOD | 2 |
+| `example-postfx-crt` | CRT / Arcade | Scanline post-processing | 2 |
+| `example-lod-billboards` | Woodland | Distance-driven mesh simplification, billboard stand-ins, transition fading | 2 |
+| `example-sprite-controls` | Air Mail | Sprite flips, per-material and per-sprite alpha, motion echoes, screen fades | 2 |
+| `example-tropical-island` | Tropical island | Sky gradient, rippled water, reflections, additive sun sprites, lens flares | 1 |
+| `example-sprites-blending` | After Hours | Additive glow meshes, sprite halos, translucent layers, mirrored-floor reflections | 1 |
+
+The last two run with one framebuffer, whose 128 KB their render queues need.
+
+The scenes were authored for 480×320. Their projection is derived from the
+output size and adapts to 320×200; their on-screen captions are pre-rendered
+bitmaps at fixed coordinates, and those placed below row 200 are not visible.
+
+The remaining seven do not fit in the RP2350's SRAM. Each was built and run on
+the board, and each exhausts the heap:
+
+| Scene | Where it runs out |
+|---|---|
+| Depth comparison, Utah teapot lighting, Cel / Teapot | First frame. The 128 KB depth buffer and a 64 KB scene leave too little for the render queue, even with one framebuffer. |
+| Neon Motorworks | First frame, after 145 KB of scene parsed from its embedded OBJ model. |
+| REPEAT, MATTER | While building the scene. Upstream places their bulk data in PSRAM. |
+| ESP 88 | Mid-film, at 5–6 fps, when a heavier scene is loaded. |
+
 ## Building
 
 Requirements: the Raspberry Pi Pico SDK (`PICO_SDK_PATH`, or `~/.pico-sdk`),
@@ -120,6 +159,7 @@ Flashing requires a CMSIS-DAP probe:
 ```bash
 picosdl/picodev.sh flash-and-logs build/picojet.elf
 picosdl/picodev.sh flash-and-logs build/picojet-flight.elf
+picosdl/picodev.sh flash-and-logs build/example-tropical-island.elf
 ```
 
 ## Architecture
@@ -166,6 +206,33 @@ approximately half of each frame blocked on the panel transfer.
 `PICOJET_FRAMEBUFFERS` selects between one and two. At 1 the program waits with
 `PSDL_PresentSync()`, which picosdl accounts as idle time on the calling core.
 
+### JetExamples runtime
+
+Upstream, each example supplies only its scene: `init(Scene&)` and
+`update(seconds)`, passed to `Esp32Jet::start()`, whose ESP32 runtime owns the
+display, scanout and frame pacing. `examples/runtime/` implements the same
+contract on picosdl, so the scene sources compile unmodified; the vendored
+directories are identical to upstream.
+
+The frame follows upstream's order (update, render, effects, after-render,
+publish) and the design above: whole RGB565 frames, two framebuffers by default,
+and both cores rasterising a fixed half each. The ESP-IDF calls the scenes make
+are PSRAM placement hints, memory queries and `esp_restart()`; small headers in
+`examples/runtime/` provide them.
+
+**One Jet build per example.** `JetConfig.hpp` is a set of compile-time
+switches and the examples disagree about them, so Jet is compiled separately
+against each example's own configuration. `examples/runtime/JetConfigPico.hpp`
+then overrides only the frame layout: upstream renders half-width interlaced
+fields for its scanout, this panel receives whole frames.
+
+**Reflections read the previous frame.** `WATER_REFLECT` materials sample
+`reflectBuffer`, which the runtime points at the buffer on the panel: a finished
+image that neither core writes. Reflections of the frame being drawn could read
+rows the other core has not reached, so with one framebuffer, where no previous
+frame exists, the raster pass stays on one core, as upstream does in the same
+case.
+
 ### System clock
 
 `PICOJET_SYS_CLOCK_KHZ` defaults to 150000, the RP2350 SDK default.
@@ -189,8 +256,8 @@ The RP2350 provides 520 KB of SRAM, of which the two framebuffers occupy 250 KB.
 
 | Program | `.text` | `.bss` | Configured heap |
 |---|---:|---:|---:|
-| `picojet` | 649,532 | 343,300 | 163,840 |
-| `picojet-flight` | 349,564 | 397,920 | 49,152 |
+| `picojet` | 659,444 | 343,312 | 163,840 |
+| `picojet-flight` | 359,772 | 397,924 | 49,152 |
 
 Jet allocates from the heap in two places. `Object` holds the mesh in
 `std::vector` members, and `Scene` builds a per-frame render queue containing
@@ -347,6 +414,21 @@ each model rotates; the upper bound of 68 fps is the panel link's ceiling.
 | sphere | 498 | 29–31 |
 | biplane | 597 | 48–67 |
 
+| JetExamples scene | Frame rate | Peak heap |
+|---|---|---:|
+| Rotating cube | 68–69 | 4 KB |
+| Particle Lab | 67–69 | 53 KB |
+| Textured crate | 26–68 | 5 KB |
+| Texture Lab | 24–28 | 9 KB |
+| CRT / Arcade | 23–28 | 7 KB |
+| Woodland | 24–32 | 94 KB |
+| Air Mail | 21–26 | 108 KB |
+| Tropical island | 19–23 | 123 KB |
+| After Hours | 9–18 | 179 KB |
+
+Ranges span the modes each scene cycles through. The heap available is about
+180 KB with two framebuffers and about 305 KB with one.
+
 `picojet-flight` runs at 33–58 fps. Unlike the viewer it is bound by the
 processor rather than the panel, and the cloud pass dominates: of a
 21.5 ms frame, 17.5 ms is the two-core raster pass, 2.0 ms the transform and
@@ -358,5 +440,6 @@ picojet is distributed under **BSD-2-Clause**. See `LICENSE`.
 
 Dependencies retain their own terms. [Jet](https://github.com/CubeCoders/Jet) is
 MIT, and its copyright notice must accompany any binary built from this
-repository. picosdl and `pio-st7789` are BSD-2-Clause. Imported models are CC0
+repository; the same applies to the JetExamples scenes under `examples/`, whose
+MIT licence is in `examples/LICENSE`. picosdl and `pio-st7789` are BSD-2-Clause. Imported models are CC0
 or originate from the pikuma course renderer.

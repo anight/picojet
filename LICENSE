@@ -38,6 +38,15 @@ the licences they arrived with:
                             copies of the software, so a binary built from this
                             repository must carry it.
 
+  examples/                 Scenes from CubeCoders' JetExamples, with their
+                            LICENSE file alongside: MIT, Copyright (c) 2026
+                            CubeCoders Limited. examples/runtime/Runtime.hpp is
+                            upstream's runtime contract, reproduced unchanged;
+                            the rest of examples/runtime/ is picojet's own and
+                            falls under the terms above. As with Jet, the MIT
+                            notice must accompany a binary built from these
+                            scenes.
+
   picosdl/                  A submodule with its own LICENSE file, BSD-2-Clause,
                             covering in turn its own pio-st7789/ (BSD-2-Clause)
                             and pio-i2s/ (BSD-3-Clause) submodules and the
